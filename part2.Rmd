@@ -1,0 +1,78 @@
+---
+title: "Areal Data Model Fitting, Part 2"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+library(tidyverse)
+library(maps)
+library(maptools)
+library(sf)
+library(usmap)
+library(arm)
+library(CARBayes)
+library(spdep)
+```
+
+
+Continuing with the Tester election dataset.
+
+```{r, echo = F}
+Tester <- read_csv('Tester_Results.csv')
+Tester <- Tester %>% 
+  mutate(Tester_Prop = TESTER / (TESTER + ROSENDALE + BRECKENRIDGE),
+         county_fips = as.character(FIPS))
+
+MT.counties <- map('county', 'montana', fill = T, plot = F)
+#map('county', 'montana')
+county.ID <- sapply(strsplit(MT.counties$names, ','), 
+                    function(x) x[2])
+mt.poly <- map2SpatialPolygons(MT.counties, IDs = county.ID)
+
+#drop Yellowstone National Park
+mt.poly.noYNP <- mt.poly[1:56,]
+mt.nb.noYNP <- poly2nb(mt.poly.noYNP)
+mt.listw <- nb2listw(mt.nb.noYNP, style = 'B')
+mt.adj.mat <- nb2mat(mt.nb.noYNP, style = 'B')
+```
+
+## Now consider some covariates to explain the response
+
+Consider a linear model with county population, using both `lm` and `S.glm`
+
+```{r, echo = T}
+lm_dat <- Tester %>% 
+  left_join(usmap::countypop %>% rename("county_fips" = fips), by = 'county_fips') %>%
+  mutate(scale_pop = scale(pop_2015))
+
+pop_model <- lm(Tester_Prop ~  scale_pop, data = lm_dat)
+display(pop_model)
+
+S.glm(Tester_Prop ~ scale_pop, data = lm_dat, family = 'gaussian', 
+      burnin = 100, n.sample = 1000, verbose = F)
+```
+
+\newpage
+
+We previously extract the residuals create a choropleth and test for spatial association. Now we will directly run the CAR model using `CARBayes`. See [vignette](https://cran.r-project.org/web/packages/CARBayes/vignettes/CARBayes.pdf) for more info and options on model fitting, including GLM models.
+
+This model can be expressed as
+
+$Y_k \sim N(\mu_k, \nu^2),$ where $\mu_k = x_k \beta + \psi_k$.
+
+A CAR prior is placed on $\psi_k$ such that the full conditional is expressed as
+
+$$\psi_k|- \sim N \left( \frac{\rho \sum_i w_{ki}\psi_i}{\rho \sum_i w_{ki} + 1 - \rho}, \frac{\tau^2}{\rho \sum_i w_{ki} + 1 - \rho}\right)$$
+
+If $\rho = 0$ there is no spatial structure present, if $\rho \rightarrow 1$ this is the intrinsic CAR model.
+
+
+
+```{r}
+
+S.CARleroux(Tester_Prop ~ scale_pop, data = lm_dat, family = 'gaussian', burnin = 10000, 
+            n.sample = 100000, W = mt.adj.mat, thin = 5, verbose = F)
+```
+
